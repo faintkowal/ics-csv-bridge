@@ -1,0 +1,6 @@
+/icsconv
+*.exe
+*.test
+*.out
+*.ics.bak
+.DS_Store
