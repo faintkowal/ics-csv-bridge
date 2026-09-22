@@ -69,12 +69,22 @@ matter as long as `uid`, `summary`, `start`, and `end` are present.
 Timestamps are RFC 3339 (`2026-01-15T09:00:00Z`) unless `all_day` is
 `true`, in which case they're plain dates (`2026-01-15`).
 
+## Recurring events
+
+`RRULE` is expanded into individual events on read: each occurrence
+becomes its own row in CSV output (all sharing the source event's UID).
+Supported: `FREQ` of `DAILY`, `WEEKLY`, `MONTHLY`, or `YEARLY`, plus
+`INTERVAL`, `COUNT`, `UNTIL`, and `BYDAY` (weekly rules only, e.g.
+`FREQ=WEEKLY;BYDAY=MO,WE,FR`). A rule with neither `COUNT` nor `UNTIL`
+is capped at 500 occurrences rather than expanding forever. `EXDATE`,
+`RDATE`, and ordinal `BYDAY` prefixes like `1MO` aren't handled; an
+`RRULE` with an unrecognized `FREQ` is left as a single occurrence.
+
 ## Known limitations
 
-This is an early skeleton. It handles single, non-recurring `VEVENT`
-entries with UTC or floating times. It does not yet understand `RRULE`
-recurrence or `VTIMEZONE` blocks, and ICS output isn't line-folded for
-very long field values.
+This is an early skeleton. It handles `VEVENT` entries with UTC or
+floating times. It does not yet understand `VTIMEZONE` blocks, and ICS
+output isn't line-folded for very long field values.
 
 ## License
 
