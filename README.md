@@ -80,11 +80,21 @@ is capped at 500 occurrences rather than expanding forever. `EXDATE`,
 `RDATE`, and ordinal `BYDAY` prefixes like `1MO` aren't handled; an
 `RRULE` with an unrecognized `FREQ` is left as a single occurrence.
 
+## Time zones
+
+`DTSTART`/`DTEND` values are read correctly whether they're UTC (`Z`
+suffix), floating (no zone info, treated as UTC), or `TZID`-qualified. For
+a `TZID`-qualified time, the TZID is first looked up as an IANA zone name
+(e.g. `America/New_York`); if that fails, a matching `VTIMEZONE` block's
+`STANDARD` offset is used as a fixed zone. DST transitions declared via a
+`VTIMEZONE`'s `DAYLIGHT` sub-component and `RRULE` aren't modeled, so a
+custom-named zone (e.g. a Windows zone ID with no IANA equivalent) will be
+off by the DST delta during daylight time.
+
 ## Known limitations
 
-This is an early skeleton. It handles `VEVENT` entries with UTC or
-floating times. It does not yet understand `VTIMEZONE` blocks, and ICS
-output isn't line-folded for very long field values.
+This is an early skeleton. ICS output isn't line-folded for very long
+field values.
 
 ## License
 

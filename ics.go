@@ -24,6 +24,8 @@ func ParseICS(r io.Reader) ([]Event, error) {
 		return nil, err
 	}
 
+	tzLocations := parseTimeZones(lines)
+
 	var events []Event
 	var cur *pendingEvent
 	for _, line := range lines {
@@ -41,10 +43,88 @@ func ParseICS(r io.Reader) ([]Event, error) {
 			}
 		case cur != nil:
 			name, params, value := splitProperty(line)
-			applyProperty(cur, name, params, value)
+			applyProperty(cur, name, params, value, tzLocations)
 		}
 	}
 	return events, nil
+}
+
+// parseTimeZones reads every VTIMEZONE block and returns a TZID -> Location
+// map for later DTSTART/DTEND lookups. If a TZID happens to be a name the
+// standard library's tzdata recognizes (common even when a VTIMEZONE block
+// is present, since some generators emit both for older-client compat), that
+// full zone is used. Otherwise the block's STANDARD offset becomes a fixed
+// zone; DST transitions declared via DAYLIGHT/RRULE aren't modeled, so a
+// custom-named zone will be off by the DST delta during daylight time.
+func parseTimeZones(lines []string) map[string]*time.Location {
+	locations := make(map[string]*time.Location)
+	var inVTZ, inStandard bool
+	var tzid, standardOffset, daylightOffset string
+
+	for _, line := range lines {
+		switch {
+		case line == "BEGIN:VTIMEZONE":
+			inVTZ, tzid, standardOffset, daylightOffset = true, "", "", ""
+		case line == "END:VTIMEZONE":
+			if tzid != "" {
+				locations[tzid] = resolveTimeZone(tzid, standardOffset, daylightOffset)
+			}
+			inVTZ = false
+		case line == "BEGIN:STANDARD":
+			inStandard = true
+		case line == "BEGIN:DAYLIGHT":
+			inStandard = false
+		case inVTZ:
+			name, _, value := splitProperty(line)
+			switch {
+			case name == "TZID":
+				tzid = value
+			case name == "TZOFFSETTO" && inStandard:
+				standardOffset = value
+			case name == "TZOFFSETTO":
+				daylightOffset = value
+			}
+		}
+	}
+	return locations
+}
+
+func resolveTimeZone(tzid, standardOffset, daylightOffset string) *time.Location {
+	if loc, err := time.LoadLocation(tzid); err == nil {
+		return loc
+	}
+	offset := standardOffset
+	if offset == "" {
+		offset = daylightOffset
+	}
+	if seconds, ok := parseUTCOffset(offset); ok {
+		return time.FixedZone(tzid, seconds)
+	}
+	return time.UTC
+}
+
+// parseUTCOffset reads an RFC 5545 TZOFFSETTO/TZOFFSETFROM value such as
+// "-0500" or "+053000" into a signed number of seconds east of UTC.
+func parseUTCOffset(value string) (int, bool) {
+	if len(value) < 5 || (value[0] != '+' && value[0] != '-') {
+		return 0, false
+	}
+	hh, err1 := strconv.Atoi(value[1:3])
+	mm, err2 := strconv.Atoi(value[3:5])
+	if err1 != nil || err2 != nil {
+		return 0, false
+	}
+	ss := 0
+	if len(value) >= 7 {
+		if s, err := strconv.Atoi(value[5:7]); err == nil {
+			ss = s
+		}
+	}
+	seconds := hh*3600 + mm*60 + ss
+	if value[0] == '-' {
+		seconds = -seconds
+	}
+	return seconds, true
 }
 
 // pendingEvent holds an Event plus the raw RRULE text while a VEVENT is
@@ -93,7 +173,7 @@ func splitProperty(line string) (name string, params map[string]string, value st
 	return name, params, value
 }
 
-func applyProperty(e *pendingEvent, name string, params map[string]string, value string) {
+func applyProperty(e *pendingEvent, name string, params map[string]string, value string, tzLocations map[string]*time.Location) {
 	switch name {
 	case "UID":
 		e.UID = unescaper.Replace(value)
@@ -104,12 +184,12 @@ func applyProperty(e *pendingEvent, name string, params map[string]string, value
 	case "LOCATION":
 		e.Location = unescaper.Replace(value)
 	case "DTSTART":
-		if t, allDay, err := parseICSTime(value, params); err == nil {
+		if t, allDay, err := parseICSTime(value, params, tzLocations); err == nil {
 			e.Start = t
 			e.AllDay = allDay
 		}
 	case "DTEND":
-		if t, _, err := parseICSTime(value, params); err == nil {
+		if t, _, err := parseICSTime(value, params, tzLocations); err == nil {
 			e.End = t
 		}
 	case "RRULE":
@@ -117,7 +197,7 @@ func applyProperty(e *pendingEvent, name string, params map[string]string, value
 	}
 }
 
-func parseICSTime(value string, params map[string]string) (t time.Time, allDay bool, err error) {
+func parseICSTime(value string, params map[string]string, tzLocations map[string]*time.Location) (t time.Time, allDay bool, err error) {
 	if params["VALUE"] == "DATE" || len(value) == 8 {
 		t, err = time.Parse("20060102", value)
 		return t, true, err
@@ -126,10 +206,27 @@ func parseICSTime(value string, params map[string]string) (t time.Time, allDay b
 		t, err = time.Parse("20060102T150405Z", value)
 		return t, false, err
 	}
-	// No timezone info in the property, and no VTIMEZONE support yet:
-	// treat it as UTC rather than silently guessing a local offset.
+	if tzid := params["TZID"]; tzid != "" {
+		if loc := lookupLocation(tzid, tzLocations); loc != nil {
+			t, err = time.ParseInLocation("20060102T150405", value, loc)
+			return t, false, err
+		}
+	}
+	// No timezone info in the property, and no VTIMEZONE block or IANA name
+	// matched the TZID: treat it as UTC rather than silently guessing a
+	// local offset.
 	t, err = time.Parse("20060102T150405", value)
 	return t.UTC(), false, err
+}
+
+func lookupLocation(tzid string, tzLocations map[string]*time.Location) *time.Location {
+	if loc, ok := tzLocations[tzid]; ok {
+		return loc
+	}
+	if loc, err := time.LoadLocation(tzid); err == nil {
+		return loc
+	}
+	return nil
 }
 
 // maxRecurrences caps how many occurrences an RRULE expands into, so a
